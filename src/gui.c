@@ -1,9 +1,40 @@
+/**
+ * @file gui.c
+ * @brief Graphical User Interface Rendering Components
+ *
+ * This module provides rendering functions for the training analytics
+ * interface, including histograms for weight distributions, dual-axis graphs
+ * for loss and accuracy metrics, live training feed displays, layer activation
+ * heatmaps, and training statistics panels. All rendering functions operate on
+ * the shared application state and are called from the main rendering loop.
+ */
+
 #include "gui.h"
 #include "app_state.h"
 #include "raylib.h"
 #include "utils.h"
 #include "visualizer.h"
 
+/**
+ * Renders a histogram visualization of weight distribution data.
+ *
+ * Computes a 40-bin histogram from the provided weight array, normalizing
+ * values to the specified range and clamping outliers. The histogram is
+ * rendered as vertical bars scaled to the maximum bin count, providing visual
+ * feedback on weight distribution characteristics for debugging and monitoring
+ * training dynamics. Large datasets are subsampled to maintain rendering
+ * performance.
+ *
+ * @param x Screen X coordinate of the histogram's top-left corner
+ * @param y Screen Y coordinate of the histogram's top-left corner
+ * @param w Width of the histogram in pixels
+ * @param h Height of the histogram in pixels
+ * @param data Pointer to the weight array to visualize
+ * @param count Number of elements in the data array
+ * @param title Text label displayed above the histogram
+ * @param range Maximum absolute value for normalization (values beyond this are
+ * clamped)
+ */
 void DrawHistogram(int x, int y, int w, int h, float *data, int count,
                    const char *title, float range) {
   DrawRectangle(x, y, w, h, COL_PANEL);
@@ -41,6 +72,23 @@ void DrawHistogram(int x, int y, int w, int h, float *data, int count,
   }
 }
 
+/**
+ * Renders a dual-axis line graph displaying two time-series datasets.
+ *
+ * Draws two overlaid line graphs representing loss (d1) and accuracy (d2)
+ * metrics over training history. The loss is scaled to a maximum of 2.5 and
+ * displayed in accent color 2, while accuracy is displayed as a percentage in
+ * accent color 1. The graph includes horizontal grid lines for reference and is
+ * used to visualize training progress and convergence behavior over time.
+ *
+ * @param x Screen X coordinate of the graph's top-left corner
+ * @param y Screen Y coordinate of the graph's top-left corner
+ * @param w Width of the graph in pixels
+ * @param h Height of the graph in pixels
+ * @param d1 Pointer to the first dataset array (loss values)
+ * @param d2 Pointer to the second dataset array (accuracy values)
+ * @param count Number of data points in each array
+ */
 void DrawDualGraph(int x, int y, int w, int h, float *d1, float *d2,
                    int count) {
   DrawRectangle(x, y, w, h, COL_PANEL);
@@ -65,6 +113,20 @@ void DrawDualGraph(int x, int y, int w, int h, float *d1, float *d2,
   DrawText("ACCURACY", x + 10, y + 25, 10, COL_ACCENT_1);
 }
 
+/**
+ * Renders the live training feed panel showing current batch processing.
+ *
+ * Displays the current image being processed by the training thread, along with
+ * the top 5 predicted class probabilities and the ground truth label. The panel
+ * title and styling change based on whether training is active or the system is
+ * in idle evaluation mode. This provides real-time feedback on what the model
+ * is currently learning and how it interprets the input data.
+ *
+ * @param x Screen X coordinate of the panel's top-left corner
+ * @param y Screen Y coordinate of the panel's top-left corner
+ * @param w Width of the panel in pixels
+ * @param h Height of the panel in pixels
+ */
 void DrawLiveFeed(int x, int y, int w, int h) {
   DrawRectangle(x, y, w, h, COL_PANEL);
   DrawRectangleLines(x, y, w, h, COL_GRID);
@@ -78,7 +140,6 @@ void DrawLiveFeed(int x, int y, int w, int h) {
   int img_x = x + 20;
   int img_y = y + 50;
 
-  // Draw the image currently in the buffer
   draw_input_grid(appState.viz_image, img_x, img_y, img_scale,
                   (Color){60, 60, 60, 255});
 
@@ -86,7 +147,6 @@ void DrawLiveFeed(int x, int y, int w, int h) {
   int bar_y = img_y;
   int bar_w = w - (bar_x - x) - 20;
 
-  // Calculate top 5 from the *current* viz_probs
   int top_idx[5];
   float top_val[5];
   for (int k = 0; k < 5; k++) {
@@ -120,6 +180,22 @@ void DrawLiveFeed(int x, int y, int w, int h) {
            img_x, img_y + 230, 20, GRAY);
 }
 
+/**
+ * Renders activation heatmaps for all convolutional layers in the network.
+ *
+ * Visualizes the internal feature maps produced by each convolutional layer,
+ * showing how the network processes input through its hierarchical feature
+ * extraction stages. Layer 1 displays edge detection filters (28x28), Layer 2
+ * shows shape recognition features (14x14), and Layer 3 displays high-level
+ * concept activations (7x7). Each filter is rendered as a color-coded heatmap
+ * where activation intensity is mapped to color saturation, providing insight
+ * into the network's internal representations.
+ *
+ * @param x Screen X coordinate of the heatmap panel's top-left corner
+ * @param y Screen Y coordinate of the heatmap panel's top-left corner
+ * @param w Width of the heatmap panel in pixels
+ * @param h Height of the heatmap panel in pixels
+ */
 void DrawLayerHeatmaps(int x, int y, int w, int h) {
   DrawRectangle(x, y, w, h, COL_PANEL);
   DrawRectangleLines(x, y, w, h, COL_GRID);
@@ -127,7 +203,6 @@ void DrawLayerHeatmaps(int x, int y, int w, int h) {
 
   int start_y = y + 50;
 
-  // Layer 1: Edges (28x28)
   int c1_scale = 2;
   int c1_w = 28 * c1_scale;
   DrawText("L1: EDGES", x + 20, start_y - 20, 10, GRAY);
@@ -148,7 +223,6 @@ void DrawLayerHeatmaps(int x, int y, int w, int h) {
     }
   }
 
-  // Layer 2: Shapes (14x14)
   int c2_y = start_y + c1_w + 40;
   int c2_scale = 3;
   int c2_w = 14 * c2_scale;
@@ -170,7 +244,6 @@ void DrawLayerHeatmaps(int x, int y, int w, int h) {
     }
   }
 
-  // Layer 3: Concepts (7x7)
   int c3_y = c2_y + c2_w + 40;
   int c3_scale = 4;
   int c3_w = 7 * c3_scale;
@@ -193,11 +266,25 @@ void DrawLayerHeatmaps(int x, int y, int w, int h) {
   }
 }
 
+/**
+ * Renders the training statistics and control panel.
+ *
+ * Displays current training status including epoch progress, batch completion,
+ * current loss value, and best achieved accuracy. Provides a toggle button to
+ * pause or resume training, with visual feedback on hover. The panel also
+ * includes a dual-axis graph showing loss and accuracy history. This panel
+ * serves as the primary control interface for monitoring and controlling the
+ * training process.
+ *
+ * @param x Screen X coordinate of the panel's top-left corner
+ * @param y Screen Y coordinate of the panel's top-left corner
+ * @param w Width of the panel in pixels
+ * @param h Height of the panel in pixels
+ */
 void DrawStatsPanel(int x, int y, int w, int h) {
   DrawRectangle(x, y, w, h, COL_PANEL);
   DrawRectangleLines(x, y, w, h, COL_GRID);
 
-  // Button logic
   const char *btn_text =
       appState.run_training ? "PAUSE TRAINING" : "RESUME TRAINING";
   int text_w = MeasureText(btn_text, 20);
@@ -220,7 +307,6 @@ void DrawStatsPanel(int x, int y, int w, int h) {
     appState.run_training = !appState.run_training;
   }
 
-  // Stats
   int col1_w = 300;
   int sy = btn_y + 60;
   DrawText("TRAINING STATUS", x + 20, sy, 20, WHITE);

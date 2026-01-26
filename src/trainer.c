@@ -1,3 +1,15 @@
+/**
+ * @file trainer.c
+ * @brief Background Training Thread and Training Loop
+ *
+ * This module implements the background training thread that continuously
+ * trains the neural network on the MNIST dataset. It manages the training loop,
+ * validation accuracy computation, model checkpointing, and visualization data
+ * updates. The thread operates independently from the main rendering thread and
+ * communicates through the shared AppState structure with mutex-protected
+ * access.
+ */
+
 #include "trainer.h"
 #include "app_state.h"
 #include "mnist.h"
@@ -10,6 +22,19 @@
 #include <string.h>
 #include <unistd.h>
 
+/**
+ * Appends loss and accuracy values to the training history buffer.
+ *
+ * Adds a new data point to the circular history buffer, maintaining a
+ * fixed-size window of the most recent training metrics. When the buffer is
+ * full, older values are shifted out to make room for the new entry. Access to
+ * the history buffer is protected by the application state mutex to ensure
+ * thread-safe updates from the training thread while the main thread reads for
+ * visualization.
+ *
+ * @param loss Cross-entropy loss value to record
+ * @param acc Validation accuracy value to record (0.0 to 1.0)
+ */
 void push_history(float loss, float acc) {
   pthread_mutex_lock(&appState.data_lock);
   if (appState.history_idx < MAX_HISTORY) {
@@ -27,8 +52,24 @@ void push_history(float loss, float acc) {
   pthread_mutex_unlock(&appState.data_lock);
 }
 
+/**
+ * Background training thread entry point.
+ *
+ * Loads the MNIST dataset, initializes training buffers, and enters the main
+ * training loop. The thread operates in two modes: active training (when
+ * run_training is true) and idle evaluation (when run_training is false).
+ * During training, it processes batches, updates the network weights, computes
+ * validation accuracy, and saves checkpoints when accuracy improves. In idle
+ * mode, it periodically evaluates random validation samples and updates
+ * visualization data. The thread updates the shared AppState structure with
+ * training progress, loss values, and visualization buffers, using mutex locks
+ * to coordinate with the main rendering thread. The function runs until
+ * should_quit is set to true.
+ *
+ * @param arg Thread argument (unused, always NULL)
+ * @return NULL (thread exit value, unused)
+ */
 void *train_thread(void *arg) {
-  // Use separate malloc'd strings to avoid static buffer overwrite
   char *img_path = resolve_path("extended-train-images-idx3-ubyte");
   char *lbl_path = resolve_path("extended-train-labels-idx1-ubyte");
 
@@ -39,7 +80,6 @@ void *train_thread(void *arg) {
 
   if (!data) {
     printf("CRITICAL ERROR: Data files not found.\n");
-    // Create dummy data to prevent crash
     data = malloc(sizeof(MnistData));
     data->count = 100;
     data->width = 28;
@@ -66,11 +106,10 @@ void *train_thread(void *arg) {
   appState.total_batches = train_count / BATCH;
   double last_viz_time = 0;
 
-  // Check accuracy
   if (data && data->count > 0) {
     printf("Verifying loaded model accuracy...\n");
     int correct = 0;
-    int startup_samples = 2000; // Check 2000 samples for a good estimate
+    int startup_samples = 2000;
     if (startup_samples > val_count)
       startup_samples = val_count;
 
@@ -94,8 +133,6 @@ void *train_thread(void *arg) {
   }
 
   while (!appState.should_quit) {
-
-    // Mode 1: training
     if (appState.run_training) {
       for (int e = 0; e < appState.max_epochs && appState.run_training; e++) {
         appState.epoch = e + 1;
@@ -109,7 +146,7 @@ void *train_thread(void *arg) {
             for (int i = 0; i < 784; i++) {
               float val = data->images[idx][i] / 255.0f;
               if (rand() % 100 < 10)
-                val += ((rand() % 100) / 400.0f); // Noise
+                val += ((rand() % 100) / 400.0f);
               b_img[k * 784 + i] = val;
             }
             memset(&b_tgt[k * OUTPUT_NODES], 0, OUTPUT_NODES * 4);
@@ -128,7 +165,6 @@ void *train_thread(void *arg) {
             pthread_mutex_lock(&appState.data_lock);
             memcpy(appState.viz_image, &b_img[0], 784 * sizeof(float));
 
-            // Use nn_forward to update internal layer buffers for visualization
             nn_forward(appState.train_nn, appState.viz_image, false);
             memcpy(appState.viz_probs, appState.train_nn->final_out,
                    OUTPUT_NODES * sizeof(float));
@@ -178,21 +214,17 @@ void *train_thread(void *arg) {
           }
         }
       }
-    }
-    // Mode 2: idle
-    else {
+    } else {
       double now = GetTime();
       if (now - last_viz_time > VIZ_UPDATE_RATE_IDLE) {
         last_viz_time = now;
         int idx = train_count + (rand() % val_count);
 
         pthread_mutex_lock(&appState.data_lock);
-        // Load Image
         for (int p = 0; p < 784; p++)
           appState.viz_image[p] = data->images[idx][p] / 255.0f;
         appState.viz_target_label = data->labels[idx];
 
-        // Use nn_forward so Idle mode also updates heatmaps
         nn_forward(appState.train_nn, appState.viz_image, false);
         memcpy(appState.viz_probs, appState.train_nn->final_out,
                OUTPUT_NODES * sizeof(float));

@@ -1,3 +1,15 @@
+/**
+ * @file nn.c
+ * @brief Neural Network Implementation and Training
+ *
+ * This module implements a convolutional neural network architecture for digit
+ * and drawing classification, consisting of three convolutional layers with
+ * max-pooling, followed by two fully-connected layers. It provides forward
+ * propagation, backpropagation with Adam optimizer, batch training, and model
+ * persistence. The implementation uses OpenMP for parallel batch processing
+ * and maintains separate activation buffers for visualization purposes.
+ */
+
 #include "nn.h"
 #include <math.h>
 #include <omp.h>
@@ -5,16 +17,64 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Math helpers
+/**
+ * Generates a random weight value using He initialization.
+ *
+ * Samples from a normal distribution with zero mean and standard deviation
+ * calculated as sqrt(2.0 / n_inputs), which is optimal for ReLU-based
+ * activation functions. The weight is scaled to prevent vanishing or
+ * exploding gradients during early training phases. The random value is
+ * drawn from a uniform distribution and scaled to approximate a normal
+ * distribution.
+ *
+ * @param n_inputs Number of input connections to the layer (fan-in)
+ * @return A random weight value in the range [-std_dev, +std_dev]
+ */
 float get_random_weight(float n_inputs) {
   float std_dev = sqrtf(2.0f / n_inputs);
   float r = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
   return r * std_dev;
 }
 
-float relu(float x) { return x > 0 ? x : x * 0.01f; } // Leaky ReLU
+/**
+ * Applies the Leaky ReLU activation function to a single value.
+ *
+ * Returns the input value if positive, otherwise multiplies by a small leak
+ * factor (0.01) to prevent complete gradient death in negative regions. This
+ * variant of ReLU maintains a small gradient flow for negative inputs, which
+ * helps prevent the "dying ReLU" problem where neurons become permanently
+ * inactive during training.
+ *
+ * @param x The input value to activate
+ * @return x if x > 0, otherwise x * 0.01
+ */
+float relu(float x) { return x > 0 ? x : x * 0.01f; }
+
+/**
+ * Computes the derivative of the Leaky ReLU activation function.
+ *
+ * Returns 1.0 for positive inputs and 0.01 for negative inputs, corresponding
+ * to the gradient of the Leaky ReLU function. This is used during
+ * backpropagation to compute the error gradient flowing backward through the
+ * activation layer.
+ *
+ * @param x The input value (typically the pre-activation value)
+ * @return 1.0 if x > 0, otherwise 0.01
+ */
 float d_relu(float x) { return x > 0 ? 1.0f : 0.01f; }
 
+/**
+ * Applies the softmax function to convert logits into probability distribution.
+ *
+ * Computes the exponential of each input value, subtracts the maximum value
+ * for numerical stability, normalizes by the sum of exponentials, and writes
+ * the results back to the input array. The output values sum to 1.0 and
+ * represent a valid probability distribution over the n classes. A small
+ * epsilon (1e-9) is added to the denominator to prevent division by zero.
+ *
+ * @param input Pointer to the input array of logits (modified in-place)
+ * @param n Number of elements in the input array
+ */
 void softmax(float *input, int n) {
   float max = input[0];
   for (int i = 1; i < n; i++)
@@ -29,20 +89,43 @@ void softmax(float *input, int n) {
     input[i] /= (sum + 1e-9f);
 }
 
+/**
+ * Allocates and zero-initializes a tensor buffer.
+ *
+ * Allocates memory for a floating-point array of the specified size and
+ * initializes all elements to zero using calloc. The pointer is written to
+ * the provided pointer-to-pointer, allowing the function to modify the caller's
+ * pointer variable. This is used for allocating activation buffers and
+ * optimizer state tensors that must start with zero values.
+ *
+ * @param ptr Pointer to a float pointer that will receive the allocated buffer
+ * @param size Number of float elements to allocate
+ */
 void alloc_tensor(float **ptr, int size) { *ptr = calloc(size, sizeof(float)); }
 
+/**
+ * Creates and initializes a new neural network instance.
+ *
+ * Allocates memory for all weight matrices, bias vectors, Adam optimizer state
+ * (momentum and velocity buffers), and activation buffers. Initializes weights
+ * using He initialization scaled by the number of input connections. Bias terms
+ * and optimizer state are initialized to zero. The network architecture
+ * consists of three convolutional layers (16, 32, 64 filters) and two
+ * fully-connected layers (256 hidden units, 70 output classes). Returns a fully
+ * initialized network ready for training or inference.
+ *
+ * @return Pointer to the newly allocated and initialized NeuralNet structure
+ */
 NeuralNet *nn_create() {
   NeuralNet *nn = (NeuralNet *)malloc(sizeof(NeuralNet));
   nn->timestep = 0;
 
-  // Sizes
   int s_c1_w = CONV1_FILTERS * 9;
   int s_c2_w = CONV2_FILTERS * CONV1_FILTERS * 9;
   int s_c3_w = CONV3_FILTERS * CONV2_FILTERS * 9;
   int s_fc1_w = FLATTEN_SIZE * HIDDEN_NODES;
   int s_fc2_w = HIDDEN_NODES * OUTPUT_NODES;
 
-  // Weights
   nn->c1_w = malloc(s_c1_w * sizeof(float));
   nn->c1_b = calloc(CONV1_FILTERS, sizeof(float));
   nn->c2_w = malloc(s_c2_w * sizeof(float));
@@ -54,7 +137,6 @@ NeuralNet *nn_create() {
   nn->fc2_w = malloc(s_fc2_w * sizeof(float));
   nn->fc2_b = calloc(OUTPUT_NODES, sizeof(float));
 
-  // Init weights
   for (int i = 0; i < s_c1_w; i++)
     nn->c1_w[i] = get_random_weight(9.0f);
   for (int i = 0; i < s_c2_w; i++)
@@ -66,7 +148,6 @@ NeuralNet *nn_create() {
   for (int i = 0; i < s_fc2_w; i++)
     nn->fc2_w[i] = get_random_weight(HIDDEN_NODES);
 
-  // Adam optimizer state
   alloc_tensor(&nn->m_c1_w, s_c1_w);
   alloc_tensor(&nn->v_c1_w, s_c1_w);
   alloc_tensor(&nn->m_c1_b, CONV1_FILTERS);
@@ -88,7 +169,6 @@ NeuralNet *nn_create() {
   alloc_tensor(&nn->m_fc2_b, OUTPUT_NODES);
   alloc_tensor(&nn->v_fc2_b, OUTPUT_NODES);
 
-  // Activations (for visualization)
   alloc_tensor(&nn->c1_out, CONV1_SIZE * CONV1_SIZE * CONV1_FILTERS);
   alloc_tensor(&nn->p1_out, POOL1_SIZE * POOL1_SIZE * CONV1_FILTERS);
   alloc_tensor(&nn->c2_out, CONV2_SIZE * CONV2_SIZE * CONV2_FILTERS);
@@ -101,6 +181,17 @@ NeuralNet *nn_create() {
   return nn;
 }
 
+/**
+ * Deallocates all memory associated with a neural network instance.
+ *
+ * Frees all weight matrices, bias vectors, Adam optimizer state buffers, and
+ * activation buffers. This function safely handles NULL pointers and ensures
+ * complete cleanup of all dynamically allocated resources. Must be called for
+ * every network created with nn_create or loaded with nn_load to prevent memory
+ * leaks.
+ *
+ * @param nn Pointer to the NeuralNet structure to deallocate, or NULL (no-op)
+ */
 void nn_free(NeuralNet *nn) {
   if (!nn)
     return;
@@ -147,7 +238,26 @@ void nn_free(NeuralNet *nn) {
   free(nn);
 }
 
-// Forward Operations
+/**
+ * Performs a 3x3 convolution operation with padding and ReLU activation.
+ *
+ * Applies a 3x3 convolutional kernel to each spatial location in the input
+ * feature maps, computing the dot product between the kernel weights and the
+ * corresponding input region. The convolution uses 'same' padding (padding of 1
+ * pixel) to maintain spatial dimensions. Each output feature map is computed by
+ * summing contributions from all input feature maps, adding the bias term, and
+ * applying Leaky ReLU activation. This operation is the core building block of
+ * the convolutional layers.
+ *
+ * @param in Pointer to the input feature maps (in_f feature maps of size d x d)
+ * @param w Pointer to the weight tensor (out_f filters, each with in_f x 9
+ * weights)
+ * @param b Pointer to the bias vector (out_f elements)
+ * @param out Pointer to the output buffer (out_f feature maps of size d x d)
+ * @param d Spatial dimension of input and output (width and height)
+ * @param in_f Number of input feature maps
+ * @param out_f Number of output feature maps (filters)
+ */
 void conv3x3(float *in, float *w, float *b, float *out, int d, int in_f,
              int out_f) {
   for (int f = 0; f < out_f; f++) {
@@ -175,6 +285,22 @@ void conv3x3(float *in, float *w, float *b, float *out, int d, int in_f,
   }
 }
 
+/**
+ * Performs 2x2 max-pooling operation to reduce spatial dimensions.
+ *
+ * Divides each input feature map into non-overlapping 2x2 regions and outputs
+ * the maximum value from each region. This reduces the spatial dimensions by
+ * a factor of 2 in both width and height, providing translation invariance and
+ * reducing computational complexity in subsequent layers. The operation is
+ * applied independently to each feature map.
+ *
+ * @param in Pointer to the input feature maps (f feature maps of size in_d x
+ * in_d)
+ * @param out Pointer to the output buffer (f feature maps of size (in_d/2) x
+ * (in_d/2))
+ * @param in_d Spatial dimension of input feature maps (width and height)
+ * @param f Number of feature maps (same for input and output)
+ */
 void maxpool(float *in, float *out, int in_d, int f) {
   int out_d = in_d / 2;
   for (int i = 0; i < f; i++) {
@@ -195,6 +321,29 @@ void maxpool(float *in, float *out, int in_d, int f) {
   }
 }
 
+/**
+ * Internal forward propagation implementation with explicit buffer management.
+ *
+ * Executes the complete forward pass through the network architecture: three
+ * convolutional layers with max-pooling, followed by two fully-connected layers
+ * with softmax output. This function accepts explicit buffer pointers for all
+ * intermediate activations, allowing callers to use either the network's
+ * internal visualization buffers or temporary thread-local buffers. The
+ * function performs the computation without modifying the network weights,
+ * making it suitable for both training (with gradient computation) and
+ * inference operations.
+ *
+ * @param nn Pointer to the neural network structure (weights are read-only)
+ * @param input Pointer to the 28x28 input image (784 elements, normalized 0-1)
+ * @param c1 Output buffer for first convolutional layer activations
+ * @param p1 Output buffer for first max-pooling layer activations
+ * @param c2 Output buffer for second convolutional layer activations
+ * @param p2 Output buffer for second max-pooling layer activations
+ * @param c3 Output buffer for third convolutional layer activations
+ * @param p3 Output buffer for third max-pooling layer activations
+ * @param fc1 Output buffer for first fully-connected layer activations
+ * @param final Output buffer for final softmax probabilities
+ */
 void nn_forward_impl(NeuralNet *nn, float *input, float *c1, float *p1,
                      float *c2, float *p2, float *c3, float *p3, float *fc1,
                      float *final) {
@@ -223,12 +372,43 @@ void nn_forward_impl(NeuralNet *nn, float *input, float *c1, float *p1,
   softmax(final, OUTPUT_NODES);
 }
 
+/**
+ * Performs forward propagation using the network's internal activation buffers.
+ *
+ * Executes a forward pass through the network and stores all intermediate
+ * activations in the network's internal buffers (c1_out, p1_out, etc.), which
+ * are used for visualization purposes. This function is the primary interface
+ * for inference operations that need to display layer activations. The training
+ * parameter is currently unused but reserved for future features like dropout
+ * or batch normalization that behave differently during training and inference.
+ *
+ * @param nn Pointer to the neural network structure
+ * @param input_data Pointer to the 28x28 input image (784 elements, normalized
+ * 0-1)
+ * @param training Boolean flag indicating training mode (currently unused)
+ */
 void nn_forward(NeuralNet *nn, float *input_data, bool training) {
   nn_forward_impl(nn, input_data, nn->c1_out, nn->p1_out, nn->c2_out,
                   nn->p2_out, nn->c3_out, nn->p3_out, nn->fc1_out,
                   nn->final_out);
 }
 
+/**
+ * Performs thread-safe inference using temporary activation buffers.
+ *
+ * Executes forward propagation using thread-local temporary buffers instead of
+ * the network's internal activation buffers. This allows multiple threads to
+ * perform inference concurrently without interfering with each other's
+ * activation data. The function allocates temporary buffers, performs the
+ * forward pass, copies the final output probabilities to the provided buffer,
+ * and then deallocates the temporaries. This is the preferred method for
+ * inference in multi-threaded contexts.
+ *
+ * @param nn Pointer to the neural network structure (weights are read-only)
+ * @param input Pointer to the 28x28 input image (784 elements, normalized 0-1)
+ * @param output_probs Pointer to the output buffer for class probabilities
+ * (OUTPUT_NODES elements)
+ */
 void nn_inference(NeuralNet *nn, float *input, float *output_probs) {
   float *t_c1 = malloc(CONV1_SIZE * CONV1_SIZE * CONV1_FILTERS * sizeof(float));
   float *t_p1 = malloc(POOL1_SIZE * POOL1_SIZE * CONV1_FILTERS * sizeof(float));
@@ -252,7 +432,24 @@ void nn_inference(NeuralNet *nn, float *input, float *output_probs) {
   free(t_out);
 }
 
-// Backpropagation helpers
+/**
+ * Computes gradients for the max-pooling layer during backpropagation.
+ *
+ * Propagates gradients backward through a 2x2 max-pooling operation by routing
+ * the output gradient to the input location that produced the maximum value
+ * during the forward pass. For each 2x2 pooling region, the gradient is
+ * accumulated only at the position that held the maximum value, with all other
+ * positions receiving zero gradient. This implements the gradient of the max
+ * function, which has a derivative of 1 at the maximum and 0 elsewhere.
+ *
+ * @param grad_out Pointer to gradients from the next layer (out_d x out_d x f)
+ * @param grad_in Pointer to output gradient buffer (in_d x in_d x f), must be
+ * zero-initialized
+ * @param input_data Pointer to the original input data from forward pass (for
+ * finding max positions)
+ * @param in_d Spatial dimension of input feature maps
+ * @param f Number of feature maps
+ */
 void backprop_pool(float *grad_out, float *grad_in, float *input_data, int in_d,
                    int f) {
   int out_d = in_d / 2;
@@ -282,6 +479,27 @@ void backprop_pool(float *grad_out, float *grad_in, float *input_data, int in_d,
   }
 }
 
+/**
+ * Applies the Adam optimizer update rule to a parameter tensor.
+ *
+ * Updates weights using the Adam (Adaptive Moment Estimation) optimization
+ * algorithm, which maintains exponential moving averages of gradients (m) and
+ * squared gradients (v) to adapt the learning rate per parameter. The function
+ * updates the momentum and velocity buffers, computes bias-corrected estimates,
+ * and applies the weight update with adaptive step sizes. Adam's
+ * hyperparameters are fixed at beta1=0.9, beta2=0.999, and epsilon=1e-8, which
+ * are standard values that work well across a wide range of problems.
+ *
+ * @param w Pointer to the weight tensor to update (modified in-place)
+ * @param m Pointer to the momentum buffer (first moment estimate, modified
+ * in-place)
+ * @param v Pointer to the velocity buffer (second moment estimate, modified
+ * in-place)
+ * @param g Pointer to the gradient tensor (n elements)
+ * @param n Number of parameters in the tensor
+ * @param lr Learning rate (step size multiplier)
+ * @param t Current timestep (used for bias correction)
+ */
 void adam(float *w, float *m, float *v, float *g, int n, float lr,
           long long t) {
   float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
@@ -294,13 +512,32 @@ void adam(float *w, float *m, float *v, float *g, int n, float lr,
   }
 }
 
-// Training loop
+/**
+ * Trains the network on a batch of examples using backpropagation and Adam
+ * optimization.
+ *
+ * Performs forward propagation, computes cross-entropy loss, executes
+ * backpropagation through all layers to compute gradients, and applies Adam
+ * optimizer updates to all weights and biases. The function uses OpenMP for
+ * parallel batch processing, with each thread maintaining local gradient
+ * accumulators that are merged in a critical section. The implementation
+ * computes gradients for convolutional layers by reversing the convolution
+ * operation and propagating errors through max-pooling layers using the maximum
+ * position routing. Returns the average cross-entropy loss over the batch.
+ *
+ * @param nn Pointer to the neural network structure (weights are modified)
+ * @param batch_input Pointer to batch input images (batch_size x 784 elements)
+ * @param batch_target Pointer to batch target labels as one-hot vectors
+ * (batch_size x OUTPUT_NODES)
+ * @param batch_size Number of examples in the batch
+ * @param lr Learning rate for Adam optimizer updates
+ * @return Average cross-entropy loss over the batch
+ */
 float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
                      int batch_size, float lr) {
   nn->timestep++;
   float total_loss = 0.0f;
 
-  // Gradient Accumulators
   int sz_c1w = CONV1_FILTERS * 9;
   int sz_c2w = CONV2_FILTERS * CONV1_FILTERS * 9;
   int sz_c3w = CONV3_FILTERS * CONV2_FILTERS * 9;
@@ -320,7 +557,6 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
 
 #pragma omp parallel
   {
-    // Thread-local buffers
     float *t_c1 =
         malloc(CONV1_SIZE * CONV1_SIZE * CONV1_FILTERS * sizeof(float));
     float *t_p1 =
@@ -336,7 +572,6 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
     float *t_fc1 = malloc(HIDDEN_NODES * sizeof(float));
     float *t_out = malloc(OUTPUT_NODES * sizeof(float));
 
-    // Thread-local gradients
     float *l_c1w = calloc(sz_c1w, sizeof(float));
     float *l_c1b = calloc(CONV1_FILTERS, sizeof(float));
     float *l_c2w = calloc(sz_c2w, sizeof(float));
@@ -348,7 +583,6 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
     float *l_fc2w = calloc(sz_fc2w, sizeof(float));
     float *l_fc2b = calloc(OUTPUT_NODES, sizeof(float));
 
-    // Error buffers
     float *d_p3 = malloc(FLATTEN_SIZE * sizeof(float));
     float *d_c3 =
         malloc(CONV3_SIZE * CONV3_SIZE * CONV3_FILTERS * sizeof(float));
@@ -368,14 +602,12 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
       float *in = &batch_input[b * 784];
       float *tgt = &batch_target[b * OUTPUT_NODES];
 
-      // Forward
       nn_forward_impl(nn, in, t_c1, t_p1, t_c2, t_p2, t_c3, t_p3, t_fc1, t_out);
 
       for (int i = 0; i < OUTPUT_NODES; i++)
         if (tgt[i] > 0.5f)
           local_loss -= logf(t_out[i] + 1e-9f);
 
-      // Backprop FC2
       float err_out[OUTPUT_NODES];
       for (int i = 0; i < OUTPUT_NODES; i++) {
         err_out[i] = t_out[i] - tgt[i];
@@ -384,7 +616,6 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
           l_fc2w[h * OUTPUT_NODES + i] += err_out[i] * t_fc1[h];
       }
 
-      // Backprop FC1
       memset(d_p3, 0, FLATTEN_SIZE * sizeof(float));
       for (int h = 0; h < HIDDEN_NODES; h++) {
         float err = 0.0f;
@@ -398,7 +629,6 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
         }
       }
 
-      // Backprop Conv3
       memset(d_c3, 0, CONV3_SIZE * CONV3_SIZE * CONV3_FILTERS * sizeof(float));
       backprop_pool(d_p3, d_c3, t_c3, CONV3_SIZE, CONV3_FILTERS);
       for (int i = 0; i < CONV3_SIZE * CONV3_SIZE * CONV3_FILTERS; i++)
@@ -432,7 +662,6 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
         }
       }
 
-      // Backprop Conv2
       memset(d_c2, 0, CONV2_SIZE * CONV2_SIZE * CONV2_FILTERS * sizeof(float));
       backprop_pool(d_p2, d_c2, t_c2, CONV2_SIZE, CONV2_FILTERS);
       for (int i = 0; i < CONV2_SIZE * CONV2_SIZE * CONV2_FILTERS; i++)
@@ -466,7 +695,6 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
         }
       }
 
-      // Backprop Conv1
       memset(d_c1, 0, CONV1_SIZE * CONV1_SIZE * CONV1_FILTERS * sizeof(float));
       backprop_pool(d_p1, d_c1, t_c1, CONV1_SIZE, CONV1_FILTERS);
       for (int i = 0; i < CONV1_SIZE * CONV1_SIZE * CONV1_FILTERS; i++)
@@ -596,6 +824,20 @@ float nn_train_batch(NeuralNet *nn, float *batch_input, float *batch_target,
   return total_loss / batch_size;
 }
 
+/**
+ * Saves the network weights and biases to a binary file.
+ *
+ * Writes all weight matrices and bias vectors to disk in a compact binary
+ * format. The file contains only the trainable parameters (weights and biases)
+ * in a fixed order: conv1 weights and biases, conv2 weights and biases, conv3
+ * weights and biases, fc1 weights and biases, fc2 weights and biases. Optimizer
+ * state and activation buffers are not saved, as they can be reinitialized when
+ * loading. The function silently returns if the file cannot be opened for
+ * writing.
+ *
+ * @param nn Pointer to the neural network structure to save
+ * @param filename Path to the output file (will be overwritten if it exists)
+ */
 void nn_save(NeuralNet *nn, const char *filename) {
   FILE *f = fopen(filename, "wb");
   if (!f)
@@ -613,6 +855,19 @@ void nn_save(NeuralNet *nn, const char *filename) {
   fclose(f);
 }
 
+/**
+ * Loads network weights and biases from a binary file.
+ *
+ * Creates a new neural network instance, allocates all buffers, and reads the
+ * weight matrices and bias vectors from the specified file. The file format
+ * must match the order used by nn_save. Optimizer state buffers are initialized
+ * to zero, as they are not persisted. Returns NULL if the file cannot be
+ * opened, allowing the caller to handle missing model files by creating a new
+ * network.
+ *
+ * @param filename Path to the model file to load
+ * @return Pointer to the loaded NeuralNet structure, or NULL on failure
+ */
 NeuralNet *nn_load(const char *filename) {
   FILE *f = fopen(filename, "rb");
   if (!f)
@@ -632,6 +887,20 @@ NeuralNet *nn_load(const char *filename) {
   return nn;
 }
 
+/**
+ * Creates a deep copy of a neural network, duplicating all weights and biases.
+ *
+ * Allocates a new neural network instance and copies all weight matrices and
+ * bias vectors from the source network. The cloned network shares the same
+ * architecture but has independent parameter values, allowing it to be modified
+ * (e.g., during training) without affecting the original. Optimizer state is
+ * initialized to zero in the clone, as it represents a fresh training state.
+ * This is used to maintain separate network instances for GUI inference and
+ * background training operations.
+ *
+ * @param src Pointer to the source neural network to clone
+ * @return Pointer to the newly allocated cloned network
+ */
 NeuralNet *nn_clone(NeuralNet *src) {
   NeuralNet *dst = nn_create();
 

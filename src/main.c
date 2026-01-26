@@ -1,3 +1,15 @@
+/**
+ * @file main.c
+ * @brief Application Entry Point and Main Event Loop
+ *
+ * This module serves as the entry point for the MNIST drawing predictor
+ * application. It initializes the neural network models, spawns the training
+ * thread, and manages the main rendering loop that handles user input, model
+ * inference, and visualization updates. The application maintains two separate
+ * neural network instances: one for stable GUI inference and another for
+ * concurrent training operations.
+ */
+
 #include "app_state.h"
 #include "gui.h"
 #include "image_proc.h"
@@ -11,29 +23,48 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Define the global app state here
+/**
+ * Global application state instance.
+ *
+ * This structure holds all shared state between the main thread and the
+ * training thread, including neural network instances, training statistics,
+ * visualization buffers, and synchronization primitives. Access to this
+ * structure is protected by the data_lock mutex for thread-safe operations.
+ */
 AppState appState = {0};
 
+/**
+ * Main application entry point.
+ *
+ * Initializes the application by loading or creating the neural network model,
+ * spawning the background training thread, and entering the main rendering
+ * loop. The function manages two separate neural network instances: gui_nn for
+ * stable inference during user interaction, and train_nn for concurrent
+ * training operations. The main loop handles user input on the drawing canvas,
+ * performs real-time inference, updates visualizations, and coordinates model
+ * updates from the training thread. The function blocks until the window is
+ * closed, then performs cleanup of all allocated resources.
+ *
+ * @return Exit status code (0 on successful completion)
+ */
 int main() {
   pthread_mutex_init(&appState.data_lock, NULL);
 
-  // Load safe model
   char *path = resolve_path(MODEL_FILENAME);
   appState.gui_nn = nn_load(path);
 
   if (!appState.gui_nn) {
     printf("No model found at %s. Creating NEW.\n", path);
     appState.gui_nn = nn_create();
-    appState.run_training = true; // Auto-start training
+    appState.run_training = true;
     appState.best_accuracy = 0.0f;
   } else {
     printf("Loaded model from %s.\n", path);
-    appState.run_training = false; // Start in Idle Mode
-    appState.best_accuracy = 0.0f; // Will be updated by thread
+    appState.run_training = false;
+    appState.best_accuracy = 0.0f;
   }
   free(path);
 
-  // Clone for training thread
   appState.train_nn = nn_clone(appState.gui_nn);
 
   pthread_t t;
@@ -53,14 +84,13 @@ int main() {
   while (!WindowShouldClose()) {
     Vector2 m = GetMousePosition();
 
-    // Check for new best model from thread
     if (appState.new_best_available) {
       pthread_mutex_lock(&appState.data_lock);
       appState.new_best_available = false;
       pthread_mutex_unlock(&appState.data_lock);
 
       nn_free(appState.gui_nn);
-      appState.gui_nn = nn_load(MODEL_FILENAME); // Reload fresh from disk
+      appState.gui_nn = nn_load(MODEL_FILENAME);
       printf("GUI Model updated.\n");
     }
 
@@ -71,7 +101,6 @@ int main() {
         appState.current_tab = TAB_TRAINING;
     }
 
-    // Dashboard Input Logic
     if (appState.current_tab == TAB_DASHBOARD) {
       if (IsMouseButtonDown(MOUSE_LEFT_BUTTON) && m.x > gx &&
           m.x < gx + display_size && m.y > gy && m.y < gy + display_size) {
@@ -84,13 +113,12 @@ int main() {
 
       downscale_input(high_res_grid, low_res_grid);
       center_input(low_res_grid, centered_grid);
-      nn_forward(appState.gui_nn, centered_grid, false); // Use Safe Model
+      nn_forward(appState.gui_nn, centered_grid, false);
     }
 
     BeginDrawing();
     ClearBackground(COL_BG);
 
-    // Header
     DrawRectangle(0, 0, 1600, 50, (Color){15, 15, 18, 255});
     Color t1 =
         (appState.current_tab == TAB_DASHBOARD) ? COL_ACCENT_1 : COL_TEXT_DIM;
@@ -165,7 +193,6 @@ int main() {
                  20, GRAY);
       }
     } else {
-      // Training Tab
       int tx = 50;
       int ty = 80;
       DrawLiveFeed(tx, ty, 500, 280);
