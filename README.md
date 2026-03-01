@@ -1,109 +1,97 @@
-# Neural Network Visualizer in C
+# CNN from Scratch in C
 
-A Convolutional Neural Network (CNN) implemented from scratch in C99 without external machine learning libraries. This project demonstrates the low-level implementation of deep learning architectures, including convolution operations, pooling layers, and the Adam optimizer. It features a custom merged dataset of 70 classes (digits, letters, and drawings) and visualizes internal network states in real-time using Raylib.
+A Convolutional Neural Network built entirely from scratch in C99 — no ML frameworks, no BLAS, no autograd. Hand-coded backpropagation, Adam optimizer, and real-time training visualization using Raylib. Trained on a merged 70-class dataset (EMNIST + Google QuickDraw).
 
-## Project Overview
+---
 
-The objective is to implement a functional deep learning engine at the memory level, managing raw pointers, tensor arithmetic, and thread synchronization manually.
+## Network Architecture
 
-**Key Technical Features:**
-*   **Custom CNN Architecture:** Implementation of convolution (3x3 kernels), max pooling, and fully connected layers.
-*   **Parallel Processing:** Uses OpenMP for matrix operation acceleration and Pthreads to separate the training loop from the UI rendering loop.
-*   **Adam Optimizer:** Implementation of Adaptive Moment Estimation for weight updates.
-*   **Automated Data Pipeline:** CMake and Python integration to automatically download, normalize, and merge EMNIST and QuickDraw datasets.
-*   **Real-Time Visualization:** Renders activation heatmaps, weight histograms, and loss/accuracy graphs during active training.
+```mermaid
+flowchart LR
+    IN["Input<br/>28×28×1"]
+    C1["Conv2D<br/>16 filters · 3×3<br/>Leaky ReLU"]
+    P1["MaxPool<br/>2×2 → 14×14×16"]
+    C2["Conv2D<br/>32 filters · 3×3<br/>Leaky ReLU"]
+    P2["MaxPool<br/>2×2 → 7×7×32"]
+    C3["Conv2D<br/>64 filters · 3×3<br/>Leaky ReLU"]
+    P3["MaxPool<br/>2×2 → 3×3×64"]
+    FLAT["Flatten<br/>576"]
+    FC1["Dense<br/>256 · ReLU"]
+    FC2["Dense<br/>70 · Softmax"]
+    OUT["Prediction<br/>70 classes"]
 
-## Architecture
-
-The network uses a 3-stage convolutional architecture designed for the 70-class merged dataset:
-
-1.  **Block 1:** Conv2D (16 filters, 3x3) → ReLU → MaxPool (2x2).
-2.  **Block 2:** Conv2D (32 filters, 3x3) → ReLU → MaxPool (2x2).
-3.  **Block 3:** Conv2D (64 filters, 3x3) → ReLU → MaxPool (2x2).
-4.  **Dense Layer:** Flatten → 256 Hidden Nodes (ReLU).
-5.  **Output Layer:** 70 Nodes (Softmax).
-
-## Build Instructions
-
-This project uses CMake for build configuration. It automatically handles C dependencies (Raylib) and Python dependencies (for data generation).
-
-### Prerequisites
-*   C Compiler (GCC/Clang/MSVC) with OpenMP support.
-*   CMake 3.24 or higher.
-*   Python 3.x (for data generation script).
-
-### Compilation
-
-1.  Create a build directory:
-    ```bash
-    mkdir build
-    cd build
-    ```
-
-2.  Configure the project:
-    ```bash
-    cmake ..
-    ```
-    *Note: The first run will create a Python virtual environment and download the datasets. This may take a few minutes.*
-
-3.  Build the executable:
-    ```bash
-    make
-    ```
-    *(Or `cmake --build .` on Windows)*
-
-## Data Setup
-
-Data acquisition is automated. The build system triggers `scripts/data.py`, which:
-1.  Downloads the EMNIST dataset (Balanced split).
-2.  Downloads specific categories from the Google QuickDraw dataset.
-3.  Normalizes orientation and merges them into a single binary format.
-4.  Outputs `extended-train-images-idx3-ubyte` and `extended-train-labels-idx1-ubyte` into the `build/data` directory.
-
-## Usage
-
-Run the executable from the build directory or the project root.
-
-```bash
-./draw_predictor
+    IN --> C1 --> P1 --> C2 --> P2 --> C3 --> P3 --> FLAT --> FC1 --> FC2 --> OUT
 ```
 
-### Interface Modes
+**70 classes:** EMNIST digits (10) + balanced letters (26) + Google QuickDraw categories (apple, book, car, clock, face, star, tree, …)
 
-The application is divided into two tabs:
+---
 
-1.  **Dashboard:**
-    *   **Canvas:** Draw digits, letters, or specific shapes (Apple, Book, Car, etc.).
-    *   **Robot Vision:** Shows the downscaled (28x28) and centered input seen by the network.
-    *   **Network View:** Visualizes the active feature maps in real-time.
-    *   **Predictions:** Displays the top 5 confidence scores.
+## Implementation
 
-2.  **Training Analytics:**
-    *   **Live Feed:** Shows the images currently being processed by the training thread.
-    *   **Graphs:** Real-time plotting of Loss and Validation Accuracy.
-    *   **Heatmaps:** Visualizes the activation patterns of all three convolutional layers.
-    *   **Histograms:** Displays the distribution of weights across layers to monitor for vanishing/exploding gradients.
+**Forward pass:** 3×3 sliding-window convolution applied manually per filter per output pixel. Max-pooling records argmax indices for gradient routing during backprop. Softmax on the output layer computes class probabilities via the numerically stable log-sum-exp formulation.
 
-### Controls
+**Backward pass:** full chain rule through all layers, manually coded:
+- Dense layers: `dW = input^T · dOut`, `db = sum(dOut)`
+- Max-pool: gradient flows only to the saved argmax position
+- Conv layers: error maps convolved with 180°-rotated weight kernels (full convolution)
 
-*   **Left Click:** Draw on canvas / Switch tabs / Toggle training pause.
-*   **Right Click / 'C':** Clear the canvas.
+**Adam optimizer:** per-weight momentum `m` and velocity `v` estimates with bias correction. Each weight gets its own adaptive learning rate — faster convergence than SGD on this architecture, especially in the early training epochs.
 
-## Implementation Details
+**He initialization:** weights sampled from `N(0, √(2/n_inputs))` — prevents vanishing/exploding gradients through deep conv stacks at initialization.
 
-### Threading Model
-The application uses a producer-consumer pattern with a mutex lock.
-*   **Main Thread:** Handles Raylib rendering, input processing, and visualization. It reads from shared state buffers.
-*   **Training Thread:** Runs the training loop (forward/backward pass) or inference loop (idle mode). It updates the shared state buffers and synchronizes via `pthread_mutex`.
+---
 
-### Forward Propagation
-The convolution operation is implemented manually using 3x3 sliding windows. The output of each filter is passed through a Rectified Linear Unit (ReLU) activation function before being downsampled by a 2x2 Max Pooling operation.
+## Threading Model
 
-### Backpropagation
-Gradients are calculated using the chain rule.
-*   **Dense Layers:** Standard matrix multiplication gradients.
-*   **Pooling Layers:** Gradients are passed only to the index of the maximum value from the forward pass.
-*   **Convolution Layers:** Gradients are calculated by convolving the error map with the rotated weights (full convolution).
+Two threads, one mutex:
 
-### Optimization
-The Adam optimizer maintains moment estimates (mean and uncentered variance) for every weight and bias in the network to adapt the learning rate for each parameter individually.
+```mermaid
+flowchart LR
+    TT["Training thread<br/>forward + backward pass<br/>Adam weight updates<br/>writes shared state buffers"]
+    MT["Main thread (Raylib)<br/>renders UI · handles input<br/>reads shared state buffers<br/>mutex-synchronized"]
+    TT <-->|pthread_mutex| MT
+```
+
+Training and rendering run concurrently — the UI never blocks on a forward pass, and the training loop never waits for a frame.
+
+---
+
+## Visualization
+
+**Dashboard tab:**
+- 28×28 draw canvas — draw digits, letters, or shapes
+- Robot vision panel — shows the preprocessed input the network sees
+- Feature map heatmaps — live activation of all layers for the current input
+- Top-5 confidence bar chart
+
+**Training analytics tab:**
+- Live loss and validation accuracy curves
+- Activation heatmaps across all three conv layers
+- Weight histograms per layer — watch for vanishing/exploding gradients
+
+---
+
+## Dataset Pipeline
+
+Automated via CMake + Python:
+
+1. Downloads EMNIST balanced split (digits + letters)
+2. Downloads selected Google QuickDraw categories
+3. Normalizes orientation (QuickDraw uses flipped Y-axis vs EMNIST)
+4. Merges into a single idx3-ubyte binary — the same format as original MNIST
+
+The merged dataset is regenerated on first build. Subsequent builds use the cached binary.
+
+---
+
+## Building
+
+**Requirements:** GCC/Clang with OpenMP · CMake 3.24+ · Python 3
+
+```bash
+mkdir build && cd build
+cmake ..      # downloads Raylib, sets up venv, runs data.py
+make
+./draw_predictor
+```
